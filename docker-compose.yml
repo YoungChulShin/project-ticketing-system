@@ -1,0 +1,5 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"   # 호스트 6379는 다른 프로젝트가 사용 중이라 6380으로 노출

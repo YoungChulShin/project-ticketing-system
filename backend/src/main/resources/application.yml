@@ -1,0 +1,15 @@
+spring:
+  application:
+    name: ticketing
+  data:
+    redis:
+      host: localhost
+      port: 6380
+
+queue:
+  capacity: 5
+  lease-seconds: 60
+  eligible-claim-seconds: 30
+  promote-interval-ms: 500
+  progress-interval-ms: 1000
+  sse-heartbeat-seconds: 15
