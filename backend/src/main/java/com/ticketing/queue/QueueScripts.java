@@ -19,4 +19,9 @@ public class QueueScripts {
     public RedisScript<String> claimScript() {
         return RedisScript.of(new ClassPathResource("scripts/claim.lua"), String.class);
     }
+
+    @Bean
+    public RedisScript<String> completeScript() {
+        return RedisScript.of(new ClassPathResource("scripts/complete.lua"), String.class);
+    }
 }

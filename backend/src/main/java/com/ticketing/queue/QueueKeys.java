@@ -7,6 +7,7 @@ public final class QueueKeys {
     public static final String ELIGIBLE = "queue:eligible";
     public static final String ACTIVE = "queue:active";
     public static final String DEQUEUED = "queue:dequeued";
+    public static final String RESERVATION_SEQ = "reservation:seq";
 
     private QueueKeys() {
     }

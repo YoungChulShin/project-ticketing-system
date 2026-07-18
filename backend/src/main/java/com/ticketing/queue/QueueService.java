@@ -2,10 +2,15 @@ package com.ticketing.queue;
 
 import com.ticketing.config.QueueProperties;
 import com.ticketing.queue.dto.ClaimResult;
+import com.ticketing.queue.dto.CompleteResult;
 import com.ticketing.queue.dto.JoinResult;
 import com.ticketing.queue.dto.MeResult;
 import java.time.Clock;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
@@ -13,20 +18,26 @@ import org.springframework.stereotype.Service;
 @Service
 public class QueueService {
 
+    private static final Logger log = LoggerFactory.getLogger(QueueService.class);
+    private static final DateTimeFormatter RESERVATION_DATE = DateTimeFormatter.BASIC_ISO_DATE;
+
     private final StringRedisTemplate redisTemplate;
     private final Clock clock;
     private final QueueProperties properties;
     private final RedisScript<String> claimScript;
+    private final RedisScript<String> completeScript;
 
     public QueueService(
             StringRedisTemplate redisTemplate,
             Clock clock,
             QueueProperties properties,
-            RedisScript<String> claimScript) {
+            RedisScript<String> claimScript,
+            RedisScript<String> completeScript) {
         this.redisTemplate = redisTemplate;
         this.clock = clock;
         this.properties = properties;
         this.claimScript = claimScript;
+        this.completeScript = completeScript;
     }
 
     /**
@@ -104,5 +115,34 @@ public class QueueService {
             case "EXPIRED" -> ClaimResult.expired();
             default -> throw new IllegalStateException("claim.lua 예상 밖 반환값: " + result);
         };
+    }
+
+    /**
+     * 예매 완료. complete.lua가 active 확인과 제거(자리 반납)를 원자적으로 처리한다.
+     *
+     * <p>결제 등 실제 예매 도메인은 범위 밖 — 예매 번호 발급과 로그로 대체한다.
+     */
+    public CompleteResult complete(String token) {
+        String result = redisTemplate.execute(
+                completeScript,
+                List.of(QueueKeys.ACTIVE),
+                token, String.valueOf(clock.millis()));
+
+        return switch (result) {
+            case "COMPLETED" -> {
+                String reservationId = nextReservationId();
+                log.info("예매 완료 — token={}, reservationId={}", token, reservationId);
+                yield CompleteResult.completed(reservationId);
+            }
+            case "NOT_ACTIVE" -> CompleteResult.notActive();
+            case "EXPIRED" -> CompleteResult.expired();
+            default -> throw new IllegalStateException("complete.lua 예상 밖 반환값: " + result);
+        };
+    }
+
+    private String nextReservationId() {
+        Long seq = redisTemplate.opsForValue().increment(QueueKeys.RESERVATION_SEQ);
+        String date = LocalDate.ofInstant(clock.instant(), clock.getZone()).format(RESERVATION_DATE);
+        return "r-%s-%d".formatted(date, seq);
     }
 }
