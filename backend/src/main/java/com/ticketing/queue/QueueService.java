@@ -5,6 +5,7 @@ import com.ticketing.queue.dto.ClaimResult;
 import com.ticketing.queue.dto.CompleteResult;
 import com.ticketing.queue.dto.JoinResult;
 import com.ticketing.queue.dto.MeResult;
+import com.ticketing.queue.dto.PromoteResult;
 import java.time.Clock;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -26,18 +27,23 @@ public class QueueService {
     private final QueueProperties properties;
     private final RedisScript<String> claimScript;
     private final RedisScript<String> completeScript;
+    @SuppressWarnings("rawtypes")
+    private final RedisScript<List> promoteScript;
 
+    @SuppressWarnings("rawtypes")
     public QueueService(
             StringRedisTemplate redisTemplate,
             Clock clock,
             QueueProperties properties,
             RedisScript<String> claimScript,
-            RedisScript<String> completeScript) {
+            RedisScript<String> completeScript,
+            RedisScript<List> promoteScript) {
         this.redisTemplate = redisTemplate;
         this.clock = clock;
         this.properties = properties;
         this.claimScript = claimScript;
         this.completeScript = completeScript;
+        this.promoteScript = promoteScript;
     }
 
     /**
@@ -138,6 +144,25 @@ public class QueueService {
             case "EXPIRED" -> CompleteResult.expired();
             default -> throw new IllegalStateException("complete.lua 예상 밖 반환값: " + result);
         };
+    }
+
+    /**
+     * 승격 실행. promote.lua가 만료 정리 → 빈자리 계산 → 승격을 원자 처리한다.
+     *
+     * <p>여러 인스턴스가 동시에 호출해도 안전 — 먼저 실행된 쪽이 승격하고 나면
+     * 나중 쪽은 빈자리 0을 보고 아무것도 하지 않는다.
+     */
+    @SuppressWarnings("unchecked")
+    public PromoteResult promote() {
+        long now = clock.millis();
+        long claimDeadline = now + properties.eligibleClaimSeconds() * 1000;
+
+        List<?> result = redisTemplate.execute(
+                promoteScript,
+                List.of(QueueKeys.WAITING, QueueKeys.ELIGIBLE, QueueKeys.ACTIVE, QueueKeys.DEQUEUED),
+                String.valueOf(now), String.valueOf(properties.capacity()), String.valueOf(claimDeadline));
+
+        return new PromoteResult((List<String>) result.get(0), (List<String>) result.get(1));
     }
 
     private String nextReservationId() {

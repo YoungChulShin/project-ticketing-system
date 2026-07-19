@@ -1,5 +1,6 @@
 package com.ticketing.queue;
 
+import java.util.List;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.ClassPathResource;
@@ -23,5 +24,11 @@ public class QueueScripts {
     @Bean
     public RedisScript<String> completeScript() {
         return RedisScript.of(new ClassPathResource("scripts/complete.lua"), String.class);
+    }
+
+    @Bean
+    @SuppressWarnings("rawtypes")
+    public RedisScript<List> promoteScript() {
+        return RedisScript.of(new ClassPathResource("scripts/promote.lua"), List.class);
     }
 }
