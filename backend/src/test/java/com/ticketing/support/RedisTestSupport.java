@@ -20,7 +20,8 @@ import org.testcontainers.containers.GenericContainer;
  * {@code @ServiceConnection}이 그 주소를 Spring Data Redis 설정에 자동 주입한다.
  * 각 테스트 메서드 전에 FLUSHALL로 데이터를 초기화해 테스트 간 독립성을 보장한다.
  */
-@SpringBootTest
+// 백그라운드 promote 스케줄러가 테스트 시나리오를 오염시키지 않도록 비활성화
+@SpringBootTest(properties = "queue.scheduling.enabled=false")
 @Import(RedisTestSupport.TestClockConfig.class)
 public abstract class RedisTestSupport {
 
