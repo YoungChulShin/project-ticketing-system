@@ -70,22 +70,35 @@ public class QueueService {
      *
      * <p>active/eligible의 score는 만료 시각(epoch ms)이므로, 스케줄러가 아직
      * 치우지 않은 만료 항목도 여기서 즉시 EXPIRED로 판정된다 (lazy 판정).
+     *
+     * <p>[과제] MeResult 팩토리들이 이제 nextPollAfterMs 인자를 요구한다 (컴파일 에러가
+     * 각 return 위치를 표시해줌). 아래 nextPollAfterMs(status, ahead) 헬퍼를 구현하고,
+     * 각 return의 마지막 인자로 그 결과를 전달하라.
+     *   - EXPIRED  return → nextPollAfterMs(QueueStatus.EXPIRED, null)
+     *   - ACTIVE   return → nextPollAfterMs(QueueStatus.ACTIVE, null)
+     *   - ELIGIBLE return → nextPollAfterMs(QueueStatus.ELIGIBLE, null)
+     *   - WAITING  return → nextPollAfterMs(QueueStatus.WAITING, waitingRank)
+     *   - NOT_FOUND return → nextPollAfterMs(QueueStatus.NOT_FOUND, null)
      */
     public MeResult me(String token) {
         Double leaseMillis = redisTemplate.opsForZSet().score(QueueKeys.ACTIVE, token);
         if (leaseMillis != null) {
             if (leaseMillis <= clock.millis()) {
-                return MeResult.expired();
+                return MeResult.expired(nextPollAfterMs(QueueStatus.EXPIRED, null));
             }
-            return MeResult.active(leaseMillis.longValue());
+            return MeResult.active(
+                leaseMillis.longValue(),
+                nextPollAfterMs(QueueStatus.ACTIVE, null));
         }
 
         Double eligibleMillis = redisTemplate.opsForZSet().score(QueueKeys.ELIGIBLE, token);
         if (eligibleMillis != null) {
             if (eligibleMillis <= clock.millis()) {
-                return MeResult.expired();
+                return MeResult.expired(nextPollAfterMs(QueueStatus.EXPIRED, null));
             }
-            return MeResult.eligible(eligibleMillis.longValue());
+            return MeResult.eligible(
+                eligibleMillis.longValue(),
+                nextPollAfterMs(QueueStatus.ELIGIBLE, null));
         }
 
         Long waitingRank = redisTemplate.opsForZSet().rank(QueueKeys.WAITING, token);
@@ -94,10 +107,42 @@ public class QueueService {
 
             return MeResult.waiting(
                 waitingRank,
-                dequeued == null ? 0L : Long.valueOf(dequeued));
+                dequeued == null ? 0L : Long.valueOf(dequeued),
+                nextPollAfterMs(QueueStatus.WAITING, waitingRank));
         }
 
-        return MeResult.notFound();
+        return MeResult.notFound(nextPollAfterMs(QueueStatus.NOT_FOUND, null));
+    }
+
+    /**
+     * [과제] 다음 폴링까지 간격(ms) 계산 — adaptive polling.
+     *
+     * <p>서버가 순번에 따라 폴링 간격을 지시한다. 먼 대기자는 길게(부하↓),
+     * 임박한 대기자는 짧게(실시간감↑). 대규모 대기열(Queue-it, NetFunnel)의 표준 패턴.
+     *
+     * <p>정책:
+     * <pre>
+     *   WAITING, ahead <= 5    ->  2000   (곧 입장, 자주 확인)
+     *   WAITING, ahead <= 20   ->  5000   (중간)
+     *   WAITING, ahead >  20   -> 10000   (멀다, 드물게 — 서버 부하 감소)
+     *   ELIGIBLE               ->  1000   (지금 claim 해야 함)
+     *   ACTIVE                 ->  1000   (예매 중)
+     *   EXPIRED, NOT_FOUND     ->     0   (종료 상태 — 클라이언트는 0을 폴링 중단 신호로 사용)
+     * </pre>
+     *
+     * @param status 판정된 상태
+     * @param ahead  WAITING일 때 앞 대기자 수(ZRANK). 그 외 상태는 null
+     */
+    private long nextPollAfterMs(QueueStatus status, Long ahead) {
+        return switch (status) {
+            case WAITING -> {
+                if (ahead <= 5) yield  2_000L;
+                else if (ahead <= 20) yield  5_000L;
+                else yield 10_000L;
+            }
+            case ELIGIBLE, ACTIVE -> 1_000L;
+            default -> 0L;
+        };
     }
 
     /**
