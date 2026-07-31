@@ -45,6 +45,50 @@ cd frontend && npm install && npm run dev
 - **원자성은 Lua로.** promote/claim/complete를 각각 Lua 스크립트로 실행 — Redis 싱글 스레드가 스크립트 전체를 원자 단위로 처리해 정원 초과(race condition)를 락 없이 차단
 - **2-phase 입장**: 승격(ELIGIBLE) 시점이 아니라 사용자가 claim한 시점부터 60초 lease 시작 → 통지·폴링 지연이 예매 시간을 깎지 않음
 
+### Redis 데이터 구조
+
+상태 머신의 각 상태가 곧 "어느 키에 들어있느냐"다. 사용자 토큰(UUID)이 아래 ZSET들 사이를 이동한다.
+
+| 키 | 타입 | member | score | 의미 |
+|---|---|---|---|---|
+| `queue:seq` | String | — | — | 진입 순번 발급기 (`INCR` 반환값 = 내 순번) |
+| `queue:waiting` | ZSET | 토큰 | **진입 순번** | 대기줄. score 작을수록 앞 |
+| `queue:eligible` | ZSET | 토큰 | **claim 마감 시각(ms)** | 승격됨, claim 대기 중 |
+| `queue:active` | ZSET | 토큰 | **lease 만료 시각(ms)** | 예매 진행 중 (최대 K명) |
+| `queue:dequeued` | String | — | — | 누적 승격 수 (근사 순번 계산용) |
+
+**핵심 아이디어 — 같은 ZSET이지만 score의 의미가 다르다:**
+
+- `waiting`은 score가 *순번* → **FIFO 큐**로 동작. `ZRANK`로 "내 앞 몇 명", `ZPOPMIN`으로 "맨 앞부터 꺼내기"
+- `eligible`/`active`는 score가 *만료 시각* → **타이머 목록**으로 동작. `ZRANGEBYSCORE 0 now` 한 번이면 만료자 전원 조회
+
+이 두 번째가 "1분 지나면 튕김"을 구현하는 방식이다. 사용자마다 서버에 타이머(`ScheduledFuture`)를 걸면 서버 재시작 시 소멸하고 다중 서버에서 동작하지 않는다. 만료 시각을 **데이터로 저장**하면 상태가 전부 Redis에 있어, 서버는 주기적으로 `ZRANGEBYSCORE`만 물어보면 된다 — 타이머 10만 개 대신 쿼리 하나.
+
+**연산 복잡도** (hot path에는 O(log N) 이하만 사용):
+
+| 연산 | 복잡도 | 쓰이는 곳 |
+|---|---|---|
+| `INCR`, `ZCARD`, `ZSCORE` | O(1) | 순번 발급, 정원 확인, 상태 조회 |
+| `ZADD`, `ZRANK` | O(log N) | 줄서기, 내 순번 조회 |
+| `ZRANGEBYSCORE`, `ZPOPMIN` | O(log N + M) | 만료자 조회, 승격 (M = 대상 수) |
+
+N=10만이어도 log₂(100000)≈17. 전체 상태 조회(`ZRANGE 0 -1`, O(N))는 관찰용 admin API에만 두고 hot path에서는 쓰지 않는다.
+
+### 상태 전이와 Redis 연산
+
+각 전이가 실제로 어떤 Redis 명령인지:
+
+| 전이 | 트리거 | Redis 연산 (Lua) |
+|---|---|---|
+| → WAITING | `join` | `INCR seq` → `ZADD NX waiting` |
+| WAITING → ELIGIBLE | promote 스케줄러 | `ZPOPMIN waiting` → `ZADD eligible` (+`INCRBY dequeued`) |
+| ELIGIBLE → ACTIVE | `claim` (자동) | `ZREM eligible` → `ZADD active` (lease 시작) |
+| ACTIVE → DONE | `complete` (예매) | `ZREM active` (자리 반납) |
+| ACTIVE → EXPIRED | lease 만료 | promote가 `ZREMRANGEBYSCORE active 0 now` |
+| ELIGIBLE → 제거 | 노쇼(claim 안 함) | promote가 `ZREMRANGEBYSCORE eligible 0 now` |
+
+promote 스케줄러(500ms)가 만료 정리 + 빈자리 계산(`K − ZCARD(active) − ZCARD(eligible)`) + 승격을 **하나의 Lua 스크립트**로 원자 실행한다. `eligible`을 정원에 함께 세는 이유는 "곧 active가 될 예약석"이기 때문 — 안 세면 claim이 몰릴 때 정원을 초과한다.
+
 ### 순번 전달 — adaptive polling
 
 클라이언트가 `GET /api/queue/me`를 주기적으로 폴링한다. **서버가 응답의 `nextPollAfterMs`로 다음 폴링 간격을 지시**하고, 클라이언트는 ±20% jitter를 얹어 재요청한다.
