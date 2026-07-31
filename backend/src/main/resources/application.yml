@@ -7,7 +7,7 @@ spring:
       port: 6380
 
 queue:
-  capacity: 5
+  capacity: 3
   lease-seconds: 60
   eligible-claim-seconds: 30
   promote-interval-ms: 500
